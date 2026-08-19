@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/larksuite/cli/errs"
 	extcred "github.com/larksuite/cli/extension/credential"
 	larkauth "github.com/larksuite/cli/internal/auth"
 	"github.com/larksuite/cli/internal/cmdutil"
@@ -27,6 +28,7 @@ const (
 	StatusMissing       = "missing"
 	StatusNeedsRefresh  = "needs_refresh"
 	StatusVerifyFailed  = "verify_failed"
+	StatusError         = "error"
 )
 
 // verifyTimeout bounds each network call made during --verify so that a
@@ -42,19 +44,20 @@ type Result struct {
 
 // Identity is a single identity diagnostic result.
 type Identity struct {
-	Status           string `json:"status"`
-	Available        bool   `json:"available"`
-	Verified         *bool  `json:"verified,omitempty"`
-	Message          string `json:"message,omitempty"`
-	Hint             string `json:"hint,omitempty"`
-	OpenID           string `json:"openId,omitempty"`
-	AppName          string `json:"appName,omitempty"`
-	UserName         string `json:"userName,omitempty"`
-	TokenStatus      string `json:"tokenStatus,omitempty"`
-	Scope            string `json:"scope,omitempty"`
-	ExpiresAt        string `json:"expiresAt,omitempty"`
-	RefreshExpiresAt string `json:"refreshExpiresAt,omitempty"`
-	GrantedAt        string `json:"grantedAt,omitempty"`
+	Status           string        `json:"status"`
+	Available        bool          `json:"available"`
+	Verified         *bool         `json:"verified,omitempty"`
+	Message          string        `json:"message,omitempty"`
+	Hint             string        `json:"hint,omitempty"`
+	Error            *errs.Problem `json:"error,omitempty"`
+	OpenID           string        `json:"openId,omitempty"`
+	AppName          string        `json:"appName,omitempty"`
+	UserName         string        `json:"userName,omitempty"`
+	TokenStatus      string        `json:"tokenStatus,omitempty"`
+	Scope            string        `json:"scope,omitempty"`
+	ExpiresAt        string        `json:"expiresAt,omitempty"`
+	RefreshExpiresAt string        `json:"refreshExpiresAt,omitempty"`
+	GrantedAt        string        `json:"grantedAt,omitempty"`
 	recoveryTarget   recovery.Target
 }
 
@@ -83,6 +86,16 @@ func FilterRecovery(result Result, canReference func(recovery.Target) bool) Resu
 	result.Bot = filter(result.Bot)
 	result.User = filter(result.User)
 	return result
+}
+
+func withProblem(identity Identity, err error) Identity {
+	problem, ok := errs.ProblemOf(err)
+	if !ok {
+		return identity
+	}
+	cloned := *problem
+	identity.Error = &cloned
+	return identity
 }
 
 // Diagnose checks bot and user identities separately. When verify is false,
@@ -295,7 +308,15 @@ func diagnoseUser(ctx context.Context, f *cmdutil.Factory, cfg *core.CliConfig, 
 		UserName: cfg.UserName,
 		OpenID:   cfg.UserOpenId,
 	}
-	stored := larkauth.GetStoredToken(cfg.AppID, cfg.UserOpenId)
+	stored, err := larkauth.ReadStoredToken(cfg.AppID, cfg.UserOpenId)
+	if err != nil {
+		id.Status = StatusError
+		id.Message = "User identity: error (" + err.Error() + ")"
+		if problem, ok := errs.ProblemOf(err); ok {
+			id.Hint = problem.Hint
+		}
+		return withProblem(id, err)
+	}
 	if stored == nil {
 		id.Status = StatusMissing
 		id.Message = "User identity: missing (no token in keychain for " + cfg.UserOpenId + ")"
@@ -456,6 +477,8 @@ func StatusMessage(status string) string {
 		return "not configured"
 	case StatusVerifyFailed:
 		return "verify failed"
+	case StatusError:
+		return "error"
 	case StatusNeedsRefresh:
 		return "needs refresh"
 	case StatusMissing:
